@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from functools import wraps
 from itertools import product
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 import torch
@@ -33,7 +33,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from matplotlib.figure import Figure
 from torch_geometric.data import Data
 from torch_geometric.utils import remove_self_loops
-from torch_scatter import segment_coo, segment_csr
+from torch_scatter import scatter, segment_coo, segment_csr
 
 if TYPE_CHECKING:
     from torch.nn.modules.module import _IncompatibleKeys
@@ -53,14 +53,16 @@ def pyg2_data_transform(data: Data):
 
 
 def save_checkpoint(
-    state, checkpoint_dir="checkpoints/", checkpoint_file="checkpoint.pt"
-):
+    state,
+    checkpoint_dir: str = "checkpoints/",
+    checkpoint_file: str = "checkpoint.pt",
+) -> str:
     filename = os.path.join(checkpoint_dir, checkpoint_file)
     torch.save(state, filename)
     return filename
 
 
-class Complete(object):
+class Complete:
     def __call__(self, data):
         device = data.edge_index.device
 
@@ -86,7 +88,7 @@ class Complete(object):
         return data
 
 
-def warmup_lr_lambda(current_step, optim_config):
+def warmup_lr_lambda(current_step: int, optim_config):
     """Returns a learning rate multiplier.
     Till `warmup_steps`, learning rate linearly increases to `initial_lr`,
     and then gets multiplied by `lr_gamma` every time a milestone is crossed.
@@ -110,7 +112,7 @@ def warmup_lr_lambda(current_step, optim_config):
         return pow(optim_config["lr_gamma"], idx)
 
 
-def print_cuda_usage():
+def print_cuda_usage() -> None:
     print("Memory Allocated:", torch.cuda.memory_allocated() / (1024 * 1024))
     print(
         "Max Memory Allocated:",
@@ -122,6 +124,7 @@ def print_cuda_usage():
 
 def conditional_grad(dec):
     "Decorator to enable/disable grad depending on whether force/energy predictions are being made"
+
     # Adapted from https://stackoverflow.com/questions/60907323/accessing-class-property-as-decorator-argument
     def decorator(func):
         @wraps(func)
@@ -136,7 +139,7 @@ def conditional_grad(dec):
     return decorator
 
 
-def plot_histogram(data, xlabel="", ylabel="", title=""):
+def plot_histogram(data, xlabel: str = "", ylabel: str = "", title: str = ""):
     assert isinstance(data, list)
 
     # Preset
@@ -205,9 +208,9 @@ def collate(data_list):
 def add_edge_distance_to_graph(
     batch,
     device="cpu",
-    dmin=0.0,
-    dmax=6.0,
-    num_gaussians=50,
+    dmin: float = 0.0,
+    dmax: float = 6.0,
+    num_gaussians: int = 50,
 ):
     # Make sure x has positions.
     if not all(batch.pos[0][:] == batch.x[0][-3:]):
@@ -233,7 +236,7 @@ def add_edge_distance_to_graph(
     return batch
 
 
-def _import_local_file(path: Path, *, project_root: Path):
+def _import_local_file(path: Path, *, project_root: Path) -> None:
     """
     Imports a Python file as a module
 
@@ -256,7 +259,7 @@ def _import_local_file(path: Path, *, project_root: Path):
     importlib.import_module(module_name)
 
 
-def setup_experimental_imports(project_root: Path):
+def setup_experimental_imports(project_root: Path) -> None:
     experimental_folder = (project_root / "experimental").resolve()
     if not experimental_folder.exists() or not experimental_folder.is_dir():
         return
@@ -278,7 +281,7 @@ def setup_experimental_imports(project_root: Path):
         _import_local_file(f, project_root=project_root)
 
 
-def _get_project_root():
+def _get_project_root() -> Path:
     """
     Gets the root folder of the project (the "ocp" folder)
     :return: The absolute path to the project root.
@@ -302,7 +305,7 @@ def _get_project_root():
 
 
 # Copied from https://github.com/facebookresearch/mmf/blob/master/mmf/utils/env.py#L89.
-def setup_imports(config: Optional[dict] = None):
+def setup_imports(config: Optional[dict] = None) -> None:
     from ocpmodels.common.registry import registry
 
     skip_experimental_imports = (config or {}).get(
@@ -330,7 +333,7 @@ def setup_imports(config: Optional[dict] = None):
         registry.register("imports_setup", True)
 
 
-def dict_set_recursively(dictionary, key_sequence, val):
+def dict_set_recursively(dictionary, key_sequence, val) -> None:
     top_key = key_sequence.pop(0)
     if len(key_sequence) == 0:
         dictionary[top_key] = val
@@ -451,8 +454,8 @@ def build_config(args, args_override):
     return config
 
 
-def create_grid(base_config, sweep_file):
-    def _flatten_sweeps(sweeps, root_key="", sep="."):
+def create_grid(base_config, sweep_file: str):
+    def _flatten_sweeps(sweeps, root_key: str = "", sep: str = "."):
         flat_sweeps = []
         for key, value in sweeps.items():
             new_key = root_key + sep + key if root_key else key
@@ -462,7 +465,7 @@ def create_grid(base_config, sweep_file):
                 flat_sweeps.append((new_key, value))
         return collections.OrderedDict(flat_sweeps)
 
-    def _update_config(config, keys, override_vals, sep="."):
+    def _update_config(config, keys, override_vals, sep: str = "."):
         for key, value in zip(keys, override_vals):
             key_path = key.split(sep)
             child_config = config
@@ -509,8 +512,8 @@ def get_pbc_distances(
     cell,
     cell_offsets,
     neighbors,
-    return_offsets=False,
-    return_distance_vec=False,
+    return_offsets: bool = False,
+    return_distance_vec: bool = False,
 ):
     row, col = edge_index
 
@@ -526,7 +529,11 @@ def get_pbc_distances(
     distances = distance_vectors.norm(dim=-1)
 
     # redundancy: remove zero distances
-    nonzero_idx = torch.arange(len(distances))[distances != 0]
+    # EDIT!!!! (JB) I will pass my own graph thanks, don't need the model
+    # automatically removing overlaps... Changed to accepting any distance >=0
+    nonzero_idx = torch.arange(len(distances), device=distances.device)[
+        distances >= 0
+    ]
     edge_index = edge_index[:, nonzero_idx]
     distances = distances[nonzero_idx]
 
@@ -545,10 +552,26 @@ def get_pbc_distances(
 
 
 def radius_graph_pbc(
-    data, radius, max_num_neighbors_threshold, pbc=[True, True, False]
+    data,
+    radius,
+    max_num_neighbors_threshold,
+    enforce_max_neighbors_strictly: bool = False,
+    pbc=[True, True, True],
 ):
     device = data.pos.device
     batch_size = len(data.natoms)
+
+    if hasattr(data, "pbc"):
+        data.pbc = torch.atleast_2d(data.pbc)
+        for i in range(3):
+            if not torch.any(data.pbc[:, i]).item():
+                pbc[i] = False
+            elif torch.all(data.pbc[:, i]).item():
+                pbc[i] = True
+            else:
+                raise RuntimeError(
+                    "Different structures in the batch have different PBC configurations. This is not currently supported."
+                )
 
     # position of the atoms
     atom_pos = data.pos
@@ -688,6 +711,7 @@ def radius_graph_pbc(
         index=index1,
         atom_distance=atom_distance_sqr,
         max_num_neighbors_threshold=max_num_neighbors_threshold,
+        enforce_max_strictly=enforce_max_neighbors_strictly,
     )
 
     if not torch.all(mask_num_neighbors):
@@ -705,13 +729,28 @@ def radius_graph_pbc(
 
 
 def get_max_neighbors_mask(
-    natoms, index, atom_distance, max_num_neighbors_threshold
+    natoms,
+    index,
+    atom_distance,
+    max_num_neighbors_threshold,
+    degeneracy_tolerance: float = 0.01,
+    enforce_max_strictly: bool = False,
 ):
     """
     Give a mask that filters out edges so that each atom has at most
     `max_num_neighbors_threshold` neighbors.
     Assumes that `index` is sorted.
+
+    Enforcing the max strictly can force the arbitrary choice between
+    degenerate edges. This can lead to undesired behaviors; for
+    example, bulk formation energies which are not invariant to
+    unit cell choice.
+
+    A degeneracy tolerance can help prevent sudden changes in edge
+    existence from small changes in atom position, for example,
+    rounding errors, slab relaxation, temperature, etc.
     """
+
     device = natoms.device
     num_atoms = natoms.sum()
 
@@ -763,13 +802,41 @@ def get_max_neighbors_mask(
 
     # Sort neighboring atoms based on distance
     distance_sort, index_sort = torch.sort(distance_sort, dim=1)
+
     # Select the max_num_neighbors_threshold neighbors that are closest
-    distance_sort = distance_sort[:, :max_num_neighbors_threshold]
-    index_sort = index_sort[:, :max_num_neighbors_threshold]
+    if enforce_max_strictly:
+        distance_sort = distance_sort[:, :max_num_neighbors_threshold]
+        index_sort = index_sort[:, :max_num_neighbors_threshold]
+        max_num_included = max_num_neighbors_threshold
+
+    else:
+        effective_cutoff = (
+            distance_sort[:, max_num_neighbors_threshold]
+            + degeneracy_tolerance
+        )
+        is_included = torch.le(distance_sort.T, effective_cutoff)
+
+        # Set all undesired edges to infinite length to be removed later
+        distance_sort[~is_included.T] = np.inf
+
+        # Subselect tensors for efficiency
+        num_included_per_atom = torch.sum(is_included, dim=0)
+        max_num_included = torch.max(num_included_per_atom)
+        distance_sort = distance_sort[:, :max_num_included]
+        index_sort = index_sort[:, :max_num_included]
+
+        # Recompute the number of neighbors
+        num_neighbors_thresholded = num_neighbors.clamp(
+            max=num_included_per_atom
+        )
+
+        num_neighbors_image = segment_csr(
+            num_neighbors_thresholded, image_indptr
+        )
 
     # Offset index_sort so that it indexes into index
     index_sort = index_sort + index_neighbor_offset.view(-1, 1).expand(
-        -1, max_num_neighbors_threshold
+        -1, max_num_included
     )
     # Remove "unused pairs" with infinite distances
     mask_finite = torch.isfinite(distance_sort)
@@ -784,20 +851,20 @@ def get_max_neighbors_mask(
     return mask_num_neighbors, num_neighbors_image
 
 
-def get_pruned_edge_idx(edge_index, num_atoms=None, max_neigh=1e9):
-    assert num_atoms is not None
+def get_pruned_edge_idx(
+    edge_index, num_atoms: int, max_neigh: float = 1e9
+) -> torch.Tensor:
+    assert num_atoms is not None  # TODO: Shouldn't be necessary
 
     # removes neighbors > max_neigh
     # assumes neighbors are sorted in increasing distance
-    _nonmax_idx = []
+    _nonmax_idx_list = []
     for i in range(num_atoms):
         idx_i = torch.arange(len(edge_index[1]))[(edge_index[1] == i)][
             :max_neigh
         ]
-        _nonmax_idx.append(idx_i)
-    _nonmax_idx = torch.cat(_nonmax_idx)
-
-    return _nonmax_idx
+        _nonmax_idx_list.append(idx_i)
+    return torch.cat(_nonmax_idx_list)
 
 
 def merge_dicts(dict1: dict, dict2: dict):
@@ -843,16 +910,16 @@ def merge_dicts(dict1: dict, dict2: dict):
 
 
 class SeverityLevelBetween(logging.Filter):
-    def __init__(self, min_level, max_level):
+    def __init__(self, min_level: int, max_level: int) -> None:
         super().__init__()
         self.min_level = min_level
         self.max_level = max_level
 
-    def filter(self, record):
+    def filter(self, record) -> bool:
         return self.min_level <= record.levelno < self.max_level
 
 
-def setup_logging():
+def setup_logging() -> None:
     root = logging.getLogger()
 
     # Perform setup only if logging has not been configured
@@ -896,7 +963,7 @@ def compute_neighbors(data, edge_index):
     return neighbors
 
 
-def check_traj_files(batch, traj_dir):
+def check_traj_files(batch, traj_dir) -> bool:
     if traj_dir is None:
         return False
     traj_dir = Path(traj_dir)
@@ -984,7 +1051,7 @@ def _report_incompat_keys(
     model: nn.Module,
     keys: "_IncompatibleKeys",
     strict: bool = False,
-):
+) -> Tuple[List[str], List[str]]:
     # filter out the missing scale factor keys for the new scaling factor module
     missing_keys: List[str] = []
     for full_key_name in keys.missing_keys:
@@ -1039,6 +1106,20 @@ def load_state_dict(
     module: nn.Module,
     state_dict: Mapping[str, torch.Tensor],
     strict: bool = True,
-):
+) -> Tuple[List[str], List[str]]:
     incompat_keys = module.load_state_dict(state_dict, strict=False)  # type: ignore
     return _report_incompat_keys(module, incompat_keys, strict=strict)
+
+
+def scatter_det(*args, **kwargs):
+    from ocpmodels.common.registry import registry
+
+    if registry.get("set_deterministic_scatter", no_warning=True):
+        torch.use_deterministic_algorithms(mode=True)
+
+    out = scatter(*args, **kwargs)
+
+    if registry.get("set_deterministic_scatter", no_warning=True):
+        torch.use_deterministic_algorithms(mode=False)
+
+    return out

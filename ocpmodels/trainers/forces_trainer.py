@@ -7,11 +7,11 @@ LICENSE file in the root directory of this source tree.
 
 import logging
 import os
-import pathlib
 from collections import defaultdict
-from pathlib import Path
+from typing import Dict, Optional
 
 import numpy as np
+import numpy.typing as npt
 import torch
 import torch_geometric
 from tqdm import tqdm
@@ -22,8 +22,8 @@ from ocpmodels.common.relaxation.ml_relaxation import ml_relax
 from ocpmodels.common.utils import check_traj_files
 from ocpmodels.modules.evaluator import Evaluator
 from ocpmodels.modules.normalizer import Normalizer
-from ocpmodels.trainers.base_trainer import BaseTrainer
 from ocpmodels.modules.scaling.util import ensure_fitted
+from ocpmodels.trainers.base_trainer import BaseTrainer
 
 
 @registry.register_trainer("forces")
@@ -72,19 +72,19 @@ class ForcesTrainer(BaseTrainer):
         optimizer,
         identifier,
         normalizer=None,
-        timestamp_id=None,
-        run_dir=None,
-        is_debug=False,
-        is_hpo=False,
-        print_every=100,
-        seed=None,
-        logger="tensorboard",
-        local_rank=0,
-        amp=False,
-        cpu=False,
+        timestamp_id: Optional[str] = None,
+        run_dir: Optional[str] = None,
+        is_debug: bool = False,
+        is_hpo: bool = False,
+        print_every: int = 100,
+        seed: Optional[int] = None,
+        logger: str = "tensorboard",
+        local_rank: int = 0,
+        amp: bool = False,
+        cpu: bool = False,
         slurm={},
-        noddp=False,
-    ):
+        noddp: bool = False,
+    ) -> None:
         super().__init__(
             task=task,
             model=model,
@@ -107,7 +107,7 @@ class ForcesTrainer(BaseTrainer):
             noddp=noddp,
         )
 
-    def load_task(self):
+    def load_task(self) -> None:
         logging.info(f"Loading dataset: {self.config['task']['dataset']}")
 
         if "relax_dataset" in self.config["task"]:
@@ -152,11 +152,11 @@ class ForcesTrainer(BaseTrainer):
     def predict(
         self,
         data_loader,
-        per_image=True,
+        per_image: bool = True,
         results_file=None,
-        disable_tqdm=False,
-    ):
-        ensure_fitted(self._unwrapped_model)
+        disable_tqdm: bool = False,
+    ) -> Dict[str, npt.NDArray[np.float_]]:
+        ensure_fitted(self._unwrapped_model, warn=True)
 
         if distutils.is_master() and not disable_tqdm:
             logging.info("Predicting on test.")
@@ -208,14 +208,26 @@ class ForcesTrainer(BaseTrainer):
                     )
                 ]
                 predictions["id"].extend(systemids)
-                predictions["energy"].extend(
-                    out["energy"].to(torch.float16).tolist()
-                )
                 batch_natoms = torch.cat(
                     [batch.natoms for batch in batch_list]
                 )
                 batch_fixed = torch.cat([batch.fixed for batch in batch_list])
-                forces = out["forces"].cpu().detach().to(torch.float16)
+                # total energy target requires predictions to be saved in float32
+                # default is float16
+                if (
+                    self.config["task"].get("prediction_dtype", "float16")
+                    == "float32"
+                    or self.config["task"]["dataset"] == "oc22_lmdb"
+                ):
+                    predictions["energy"].extend(
+                        out["energy"].cpu().detach().to(torch.float32).numpy()
+                    )
+                    forces = out["forces"].cpu().detach().to(torch.float32)
+                else:
+                    predictions["energy"].extend(
+                        out["energy"].cpu().detach().to(torch.float16).numpy()
+                    )
+                    forces = out["forces"].cpu().detach().to(torch.float16)
                 per_image_forces = torch.split(forces, batch_natoms.tolist())
                 per_image_forces = [
                     force.numpy() for force in per_image_forces
@@ -247,10 +259,14 @@ class ForcesTrainer(BaseTrainer):
                     self.ema.restore()
                 return predictions
 
-        predictions["forces"] = np.array(predictions["forces"])
-        predictions["chunk_idx"] = np.array(predictions["chunk_idx"])
+        predictions["forces"] = np.array(predictions["forces"], dtype=object)
+        predictions["chunk_idx"] = np.array(
+            predictions["chunk_idx"],
+        )
         predictions["energy"] = np.array(predictions["energy"])
-        predictions["id"] = np.array(predictions["id"])
+        predictions["id"] = np.array(
+            predictions["id"],
+        )
         self.save_results(
             predictions, results_file, keys=["energy", "forces", "chunk_idx"]
         )
@@ -264,8 +280,8 @@ class ForcesTrainer(BaseTrainer):
         self,
         primary_metric,
         val_metrics,
-        disable_eval_tqdm=True,
-    ):
+        disable_eval_tqdm: bool = True,
+    ) -> None:
         if (
             "mae" in primary_metric
             and val_metrics[primary_metric]["metric"] < self.best_val_metric
@@ -286,7 +302,7 @@ class ForcesTrainer(BaseTrainer):
                     disable_tqdm=disable_eval_tqdm,
                 )
 
-    def train(self, disable_eval_tqdm=False):
+    def train(self, disable_eval_tqdm: bool = False) -> None:
         ensure_fitted(self._unwrapped_model, warn=True)
 
         eval_every = self.config["optim"].get(
@@ -446,7 +462,7 @@ class ForcesTrainer(BaseTrainer):
 
         return out
 
-    def _compute_loss(self, out, batch_list):
+    def _compute_loss(self, out, batch_list) -> int:
         loss = []
 
         # Energy loss.
@@ -489,21 +505,38 @@ class ForcesTrainer(BaseTrainer):
                 weight[batch_tags == 1] = tag_specific_weights[1]
                 weight[batch_tags == 2] = tag_specific_weights[2]
 
-                loss_force_list = torch.abs(out["forces"] - force_target)
-                train_loss_force_unnormalized = torch.sum(
-                    loss_force_list * weight.view(-1, 1)
-                )
-                train_loss_force_normalizer = 3.0 * weight.sum()
+                if self.config["optim"].get("loss_force", "l2mae") == "l2mae":
+                    # zero out nans, if any
+                    found_nans_or_infs = not torch.all(
+                        out["forces"].isfinite()
+                    )
+                    if found_nans_or_infs is True:
+                        logging.warning("Found nans while computing loss")
+                        out["forces"] = torch.nan_to_num(
+                            out["forces"], nan=0.0
+                        )
 
-                # add up normalizer to obtain global normalizer
-                distutils.all_reduce(train_loss_force_normalizer)
+                    dists = torch.norm(
+                        out["forces"] - force_target, p=2, dim=-1
+                    )
+                    weighted_dists_sum = (dists * weight).sum()
 
-                # perform loss normalization before backprop
-                train_loss_force_normalized = train_loss_force_unnormalized * (
-                    distutils.get_world_size() / train_loss_force_normalizer
-                )
-                loss.append(train_loss_force_normalized)
+                    num_samples = out["forces"].shape[0]
+                    num_samples = distutils.all_reduce(
+                        num_samples, device=self.device
+                    )
+                    weighted_dists_sum = (
+                        weighted_dists_sum
+                        * distutils.get_world_size()
+                        / num_samples
+                    )
 
+                    force_mult = self.config["optim"].get(
+                        "force_coefficient", 30
+                    )
+                    loss.append(force_mult * weighted_dists_sum)
+                else:
+                    raise NotImplementedError
             else:
                 # Force coefficient = 30 has been working well for us.
                 force_mult = self.config["optim"].get("force_coefficient", 30)
@@ -598,8 +631,16 @@ class ForcesTrainer(BaseTrainer):
         metrics = evaluator.eval(out, target, prev_metrics=metrics)
         return metrics
 
-    def run_relaxations(self, split="val"):
+    def run_relaxations(self, split: str = "val") -> None:
         ensure_fitted(self._unwrapped_model)
+
+        # When set to true, uses deterministic CUDA scatter ops, if available.
+        # https://pytorch.org/docs/stable/generated/torch.use_deterministic_algorithms.html#torch.use_deterministic_algorithms
+        # Only implemented for GemNet-OC currently.
+        registry.register(
+            "set_deterministic_scatter",
+            self.config["task"].get("set_deterministic_scatter", False),
+        )
 
         logging.info("Running ML-relaxations")
         self.model.eval()
@@ -645,6 +686,7 @@ class ForcesTrainer(BaseTrainer):
                 steps=self.config["task"].get("relaxation_steps", 200),
                 fmax=self.config["task"].get("relaxation_fmax", 0.0),
                 relax_opt=self.config["task"]["relax_opt"],
+                save_full_traj=self.config["task"].get("save_full_traj", True),
                 device=self.device,
                 transform=None,
             )
@@ -784,3 +826,5 @@ class ForcesTrainer(BaseTrainer):
 
         if self.ema:
             self.ema.restore()
+
+        registry.unregister("set_deterministic_scatter")

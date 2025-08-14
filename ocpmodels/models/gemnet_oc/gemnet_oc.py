@@ -5,21 +5,17 @@ LICENSE file in the root directory of this source tree.
 """
 
 import logging
-import os
-from typing import Optional
+from typing import Dict, Optional, Union
 
 import numpy as np
 import torch
-from torch_geometric.nn import radius_graph
-from torch_scatter import scatter, segment_coo
+from torch_scatter import segment_coo
 
 from ocpmodels.common.registry import registry
 from ocpmodels.common.utils import (
-    compute_neighbors,
     conditional_grad,
     get_max_neighbors_mask,
-    get_pbc_distances,
-    radius_graph_pbc,
+    scatter_det,
 )
 from ocpmodels.models.base import BaseModel
 from ocpmodels.modules.scaling.compat import load_scales_compat
@@ -141,7 +137,9 @@ class GemNetOC(BaseModel):
     max_neighbors_aint: int
         Maximum number of atom-to-atom interactions per atom.
         Optional. Uses maximum of all other neighbors per default.
-
+    enforce_max_neighbors_strictly: bool
+        When subselected edges based on max_neighbors args, arbitrarily
+        select amongst degenerate edges to have exactly the correct number.
     rbf: dict
         Name and hyperparameters of the radial basis function.
     rbf_spherical: dict
@@ -220,11 +218,15 @@ class GemNetOC(BaseModel):
         max_neighbors_qint: Optional[int] = None,
         max_neighbors_aeaint: Optional[int] = None,
         max_neighbors_aint: Optional[int] = None,
-        rbf: dict = {"name": "gaussian"},
+        enforce_max_neighbors_strictly: bool = True,
+        rbf: Dict[str, str] = {"name": "gaussian"},
         rbf_spherical: Optional[dict] = None,
-        envelope: dict = {"name": "polynomial", "exponent": 5},
-        cbf: dict = {"name": "spherical_harmonics"},
-        sbf: dict = {"name": "spherical_harmonics"},
+        envelope: Dict[str, Union[str, int]] = {
+            "name": "polynomial",
+            "exponent": 5,
+        },
+        cbf: Dict[str, str] = {"name": "spherical_harmonics"},
+        sbf: Dict[str, str] = {"name": "spherical_harmonics"},
         extensive: bool = True,
         forces_coupled: bool = False,
         output_init: str = "HeOrthogonal",
@@ -239,7 +241,7 @@ class GemNetOC(BaseModel):
         otf_graph: bool = False,
         scale_file: Optional[str] = None,
         **kwargs,  # backwards compatibility with deprecated arguments
-    ):
+    ) -> None:
         super().__init__()
         if len(kwargs) > 0:
             logging.warning(f"Unrecognized arguments: {list(kwargs.keys())}")
@@ -264,6 +266,7 @@ class GemNetOC(BaseModel):
             max_neighbors_aeaint,
             max_neighbors_aint,
         )
+        self.enforce_max_neighbors_strictly = enforce_max_neighbors_strictly
         self.use_pbc = use_pbc
 
         self.direct_forces = direct_forces
@@ -342,8 +345,7 @@ class GemNetOC(BaseModel):
                 emb_size_atom,
                 activation=activation,
             )
-        ]
-        out_mlp_E += [
+        ] + [
             ResidualLayer(
                 emb_size_atom,
                 activation=activation,
@@ -361,8 +363,7 @@ class GemNetOC(BaseModel):
                     emb_size_edge,
                     activation=activation,
                 )
-            ]
-            out_mlp_F += [
+            ] + [
                 ResidualLayer(
                     emb_size_edge,
                     activation=activation,
@@ -696,7 +697,13 @@ class GemNetOC(BaseModel):
 
         return cosφ_cab, cosφ_abd, angle_cabd
 
-    def select_symmetric_edges(self, tensor, mask, reorder_idx, opposite_neg):
+    def select_symmetric_edges(
+        self,
+        tensor: torch.Tensor,
+        mask: torch.Tensor,
+        reorder_idx: torch.Tensor,
+        opposite_neg,
+    ) -> torch.Tensor:
         """Use a mask to remove values of removed edges and then
         duplicate the values for the correct edge direction.
 
@@ -857,6 +864,7 @@ class GemNetOC(BaseModel):
                 index=subgraph["edge_index"][1],
                 atom_distance=subgraph["distance"],
                 max_num_neighbors_threshold=max_neighbors,
+                enforce_max_strictly=self.enforce_max_neighbors_strictly,
             )
             if not torch.all(edge_mask):
                 subgraph["edge_index"] = subgraph["edge_index"][:, edge_mask]
@@ -1307,11 +1315,11 @@ class GemNetOC(BaseModel):
 
         nMolecules = torch.max(batch) + 1
         if self.extensive:
-            E_t = scatter(
+            E_t = scatter_det(
                 E_t, batch, dim=0, dim_size=nMolecules, reduce="add"
             )  # (nMolecules, num_targets)
         else:
-            E_t = scatter(
+            E_t = scatter_det(
                 E_t, batch, dim=0, dim_size=nMolecules, reduce="mean"
             )  # (nMolecules, num_targets)
 
@@ -1324,7 +1332,7 @@ class GemNetOC(BaseModel):
                         repeats=2,
                         continuous_indexing=True,
                     )
-                    F_st = scatter(
+                    F_st = scatter_det(
                         F_st,
                         id_undir,
                         dim=0,
@@ -1336,7 +1344,7 @@ class GemNetOC(BaseModel):
                 # map forces in edge directions
                 F_st_vec = F_st[:, :, None] * main_graph["vector"][:, None, :]
                 # (nEdges, num_targets, 3)
-                F_t = scatter(
+                F_t = scatter_det(
                     F_st_vec,
                     idx_t,
                     dim=0,
@@ -1354,5 +1362,5 @@ class GemNetOC(BaseModel):
             return E_t
 
     @property
-    def num_params(self):
+    def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())

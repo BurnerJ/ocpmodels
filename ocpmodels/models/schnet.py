@@ -10,11 +10,7 @@ from torch_geometric.nn import SchNet
 from torch_scatter import scatter
 
 from ocpmodels.common.registry import registry
-from ocpmodels.common.utils import (
-    conditional_grad,
-    get_pbc_distances,
-    radius_graph_pbc,
-)
+from ocpmodels.common.utils import conditional_grad
 from ocpmodels.models.base import BaseModel
 
 
@@ -56,25 +52,26 @@ class SchNetWrap(SchNet, BaseModel):
 
     def __init__(
         self,
-        num_atoms,  # not used
-        bond_feat_dim,  # not used
-        num_targets,
-        use_pbc=True,
-        regress_forces=True,
-        otf_graph=False,
-        hidden_channels=128,
-        num_filters=128,
-        num_interactions=6,
-        num_gaussians=50,
-        cutoff=10.0,
-        readout="add",
-    ):
+        num_atoms: int,  # not used
+        bond_feat_dim: int,  # not used
+        num_targets: int,
+        use_pbc: bool = True,
+        regress_forces: bool = True,
+        otf_graph: bool = False,
+        hidden_channels: int = 128,
+        num_filters: int = 128,
+        num_interactions: int = 6,
+        num_gaussians: int = 50,
+        cutoff: float = 10.0,
+        readout: str = "add",
+    ) -> None:
         self.num_targets = num_targets
         self.regress_forces = regress_forces
         self.use_pbc = use_pbc
         self.cutoff = cutoff
         self.otf_graph = otf_graph
         self.max_neighbors = 50
+        self.reduce = readout
         super(SchNetWrap, self).__init__(
             hidden_channels=hidden_channels,
             num_filters=num_filters,
@@ -113,7 +110,7 @@ class SchNetWrap(SchNet, BaseModel):
             h = self.lin2(h)
 
             batch = torch.zeros_like(z) if batch is None else batch
-            energy = scatter(h, batch, dim=0, reduce=self.readout)
+            energy = scatter(h, batch, dim=0, reduce=self.reduce)
         else:
             energy = super(SchNetWrap, self).forward(z, pos, batch)
         return energy
@@ -137,5 +134,5 @@ class SchNetWrap(SchNet, BaseModel):
             return energy
 
     @property
-    def num_params(self):
+    def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())

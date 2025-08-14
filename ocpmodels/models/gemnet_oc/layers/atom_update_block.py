@@ -5,13 +5,13 @@ LICENSE file in the root directory of this source tree.
 """
 
 import math
+from typing import Optional
 
 import torch
-from torch_scatter import scatter
 
+from ocpmodels.common.utils import scatter_det
 from ocpmodels.modules.scaling import ScaleFactor
 
-from ..initializers import get_initializer
 from .base_layers import Dense, ResidualLayer
 
 
@@ -40,7 +40,7 @@ class AtomUpdateBlock(torch.nn.Module):
         emb_size_rbf: int,
         nHidden: int,
         activation=None,
-    ):
+    ) -> None:
         super().__init__()
 
         self.dense_rbf = Dense(
@@ -52,7 +52,7 @@ class AtomUpdateBlock(torch.nn.Module):
             emb_size_edge, emb_size_atom, nHidden, activation
         )
 
-    def get_mlp(self, units_in, units, nHidden, activation):
+    def get_mlp(self, units_in: int, units: int, nHidden: int, activation):
         if units_in != units:
             dense1 = Dense(units_in, units, activation=activation, bias=False)
             mlp = [dense1]
@@ -60,12 +60,12 @@ class AtomUpdateBlock(torch.nn.Module):
             mlp = []
         res = [
             ResidualLayer(units, nLayers=2, activation=activation)
-            for i in range(nHidden)
+            for _ in range(nHidden)
         ]
         mlp += res
         return torch.nn.ModuleList(mlp)
 
-    def forward(self, h, m, basis_rad, idx_atom):
+    def forward(self, h: torch.Tensor, m, basis_rad, idx_atom):
         """
         Returns
         -------
@@ -77,7 +77,7 @@ class AtomUpdateBlock(torch.nn.Module):
         bases_emb = self.dense_rbf(basis_rad)  # (nEdges, emb_size_edge)
         x = m * bases_emb
 
-        x2 = scatter(
+        x2 = scatter_det(
             x, idx_atom, dim=0, dim_size=nAtoms, reduce="sum"
         )  # (nAtoms, emb_size_edge)
         x = self.scale_sum(x2, ref=m)
@@ -118,9 +118,9 @@ class OutputBlock(AtomUpdateBlock):
         emb_size_rbf: int,
         nHidden: int,
         nHidden_afteratom: int,
-        activation=None,
-        direct_forces=True,
-    ):
+        activation: Optional[str] = None,
+        direct_forces: bool = True,
+    ) -> None:
         super().__init__(
             emb_size_atom=emb_size_atom,
             emb_size_edge=emb_size_edge,
@@ -149,7 +149,7 @@ class OutputBlock(AtomUpdateBlock):
                 emb_size_rbf, emb_size_edge, activation=None, bias=False
             )
 
-    def forward(self, h, m, basis_rad, idx_atom):
+    def forward(self, h: torch.Tensor, m: torch.Tensor, basis_rad, idx_atom):
         """
         Returns
         -------
@@ -164,7 +164,7 @@ class OutputBlock(AtomUpdateBlock):
         basis_emb_E = self.dense_rbf(basis_rad)  # (nEdges, emb_size_edge)
         x = m * basis_emb_E
 
-        x_E = scatter(
+        x_E = scatter_det(
             x, idx_atom, dim=0, dim_size=nAtoms, reduce="sum"
         )  # (nAtoms, emb_size_edge)
         x_E = self.scale_sum(x_E, ref=m)
@@ -181,7 +181,7 @@ class OutputBlock(AtomUpdateBlock):
         # ------------------------- Edge embeddings ------------------------ #
         if self.direct_forces:
             x_F = m
-            for i, layer in enumerate(self.seq_forces):
+            for _, layer in enumerate(self.seq_forces):
                 x_F = layer(x_F)  # (nEdges, emb_size_edge)
 
             basis_emb_F = self.dense_rbf_F(basis_rad)
